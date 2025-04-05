@@ -24,7 +24,18 @@ pub fn execute_defaults_write(
     value_str: &str,
     action: &str,
     verbose: bool,
+    dry_run: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    if dry_run {
+        print_log(
+            LogLevel::Info,
+            &format!(
+                "Dry-run: Would execute: defaults write {} \"{}\" {} \"{}\"",
+                eff_domain, eff_key, flag, value_str
+            ),
+        );
+        return Ok(());
+    }
     if verbose {
         print_log(
             LogLevel::Info,
@@ -66,7 +77,18 @@ pub fn execute_defaults_delete(
     eff_key: &str,
     action: &str,
     verbose: bool,
+    dry_run: bool,
 ) -> Result<(), Box<dyn std::error::Error>> {
+    if dry_run {
+        print_log(
+            LogLevel::Info,
+            &format!(
+                "Dry-run: Would execute: defaults delete {} \"{}\"",
+                eff_domain, eff_key
+            ),
+        );
+        return Ok(());
+    }
     if verbose {
         print_log(
             LogLevel::Info,
