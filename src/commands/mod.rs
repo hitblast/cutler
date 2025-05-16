@@ -4,6 +4,7 @@ pub mod brew_install;
 pub mod config_delete;
 pub mod config_show;
 pub mod exec;
+pub mod fulldisk;
 pub mod init;
 pub mod reset;
 pub mod status;
@@ -27,6 +28,7 @@ pub async fn dispatch(
 
     let result = match command {
         Command::Apply { no_exec } => apply::run(*no_exec, verbose, dry_run).await,
+        Command::SeeFullDisk => fulldisk::run().await,
         Command::Exec { name } => exec::run(name.clone(), verbose, dry_run).await,
         Command::Init { force } => init::run(verbose, *force).await,
         Command::Unapply => unapply::run(verbose, dry_run).await,

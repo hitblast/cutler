@@ -34,6 +34,8 @@ pub enum Command {
         #[arg(long)]
         no_exec: bool,
     },
+    /// See the list of bundle IDs granted with full-disk access (experimental feature)
+    SeeFullDisk,
     /// Homebrew backup-and-restore related commands.
     Brew {
         #[command(subcommand)]
