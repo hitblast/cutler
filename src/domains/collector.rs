@@ -1,10 +1,6 @@
-use std::collections::{HashMap, HashSet};
-use std::sync::{LazyLock, Mutex, Once};
-use tokio::process::Command;
+use defaults_rs::{Domain, PrefValue, ReadResult, preferences::Preferences};
+use std::collections::HashMap;
 use toml::Value;
-
-static DOMAIN_CACHE: LazyLock<Mutex<Option<HashSet<String>>>> = LazyLock::new(|| Mutex::new(None));
-static INIT: Once = Once::new();
 
 /// Recursively flatten nested TOML tables into (domain, settings‑table) pairs.
 fn flatten_domains(
@@ -45,7 +41,9 @@ pub fn collect(parsed: &Value) -> Result<HashMap<String, toml::value::Table>, an
                 for (domain_key, domain_val) in set_inner {
                     if let Value::Table(inner) = domain_val {
                         let mut flat = Vec::with_capacity(inner.len());
+
                         flatten_domains(Some(domain_key.clone()), inner, &mut flat);
+
                         for (domain, tbl) in flat {
                             out.insert(domain, tbl);
                         }
@@ -75,68 +73,66 @@ pub fn effective(domain: &str, key: &str) -> (String, String) {
 
 /// do we need to prefix “com.apple.” on this domain?
 pub fn needs_prefix(domain: &str) -> bool {
-    !domain.starts_with("NSGlobalDomain")
+    !domain.starts_with("NSGlobalDomain") && !domain.starts_with("com.apple.")
 }
 
 /// Check whether a domain exists.
-async fn domain_exists(full: &str) -> bool {
-    {
-        let cache = DOMAIN_CACHE.lock().unwrap();
-        if let Some(set) = &*cache {
-            if set.contains(full) {
-                return true;
-            }
-        }
-    }
-    // direct read as fallback
-    Command::new("defaults")
-        .arg("read")
-        .arg(full)
-        .output()
-        .await
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-}
+pub async fn check_domain_exists(full_domain: &str) -> Result<(), anyhow::Error> {
+    let domains = Preferences::list_domains().await.unwrap();
 
-/// Extension of domain_exists() which also sets the cache.
-/// Public check—errors out if the domain is missing.
-pub async fn check_exists(full_domain: &str) -> Result<(), anyhow::Error> {
-    INIT.call_once(|| {
-        tokio::spawn(async {
-            if let Ok(out) = Command::new("defaults").arg("domains").output().await {
-                if out.status.success() {
-                    let s = String::from_utf8_lossy(&out.stdout);
-                    let set: HashSet<_> = s
-                        .split(|c: char| c == ',' || c.is_whitespace())
-                        .filter(|x| !x.is_empty())
-                        .map(|x| x.to_string())
-                        .collect();
-                    *DOMAIN_CACHE.lock().unwrap() = Some(set);
-                }
-            }
-        });
-    });
-
-    if domain_exists(full_domain).await {
+    if domains.contains(&full_domain.to_owned()) {
         Ok(())
     } else {
-        Err(anyhow::anyhow!("Domain '{}' does not exist", full_domain))
+        anyhow::bail!("Domain \"{}\" does not exist!", full_domain)
     }
 }
 
 /// Read the current value of a defaults key, if any.
 pub async fn read_current(eff_domain: &str, eff_key: &str) -> Option<String> {
-    let out = Command::new("defaults")
-        .arg("read")
-        .arg(eff_domain)
-        .arg(eff_key)
-        .output()
-        .await
-        .ok()?;
+    let domain_obj = if eff_domain == "NSGlobalDomain" {
+        Domain::Global
+    } else if let Some(rest) = eff_domain.strip_prefix("com.apple.") {
+        Domain::User(format!("com.apple.{}", rest))
+    } else {
+        Domain::User(eff_domain.to_string())
+    };
 
-    if !out.status.success() {
-        return None;
+    fn prefvalue_to_cutler_string(val: &PrefValue) -> String {
+        match val {
+            PrefValue::Boolean(b) => {
+                if *b {
+                    "1".into()
+                } else {
+                    "0".into()
+                }
+            }
+            PrefValue::Integer(i) => i.to_string(),
+            PrefValue::Float(f) => f.to_string(),
+            PrefValue::String(s) => s.clone(),
+            PrefValue::Array(arr) => {
+                let inner = arr
+                    .iter()
+                    .map(prefvalue_to_cutler_string)
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("[{}]", inner)
+            }
+            PrefValue::Dictionary(dict) => {
+                let inner = dict
+                    .iter()
+                    .map(|(k, v)| format!("{}: {}", k, prefvalue_to_cutler_string(v)))
+                    .collect::<Vec<_>>()
+                    .join(", ");
+                format!("{{{}}}", inner)
+            }
+        }
     }
-    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if s.is_empty() { None } else { Some(s) }
+
+    match Preferences::read(domain_obj, Some(eff_key)).await {
+        Ok(result) => match result {
+            ReadResult::Value(val) => Some(prefvalue_to_cutler_string(&val)),
+            ReadResult::Plist(plist_val) => Some(format!("{plist_val:?}")),
+        },
+        Err(_) => None,
+    }
 }

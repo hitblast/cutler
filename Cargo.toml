@@ -1,6 +1,6 @@
 [package]
 name = "cutler"
-version = "0.7.3"
+version = "0.7.4"
 edition = "2024"
 description = "Powerful, declarative settings management for your Mac, with speed."
 homepage = "https://hitblast.github.io/cutler"
@@ -26,6 +26,7 @@ toml_edit = "0.22"
 dialoguer = "0.11.0"
 self_update = { version = "0.42.0", features = ["compression-zip-deflate"] }
 async-trait = "0.1.88"
+defaults-rs = "0.1.5"
 
 [dev-dependencies]
 tempfile = "3.20.0"

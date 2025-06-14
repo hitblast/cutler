@@ -1,27 +1,31 @@
 use anyhow::{Context, Result, bail};
 use async_trait::async_trait;
+use clap::Args;
+use defaults_rs::{Domain, preferences::Preferences};
+use std::collections::HashMap;
 use tokio::fs;
 
 use crate::{
     commands::{GlobalArgs, Runnable},
-    defaults::{executor, from_flag},
+    defaults::{convert::toml_to_prefvalue, executor},
     snapshot::state::{Snapshot, get_snapshot_path},
     util::logging::{LogLevel, print_log},
 };
-use clap::Args;
 
-/// Defines an undo operation to be executed by the unapply command.
-#[derive(Clone)]
-enum Undo {
-    Restore {
-        domain: String,
-        key: String,
-        orig: String,
-    },
-    Delete {
-        domain: String,
-        key: String,
-    },
+/// Helper: turn string to TOML value
+fn string_to_toml_value(s: &str) -> toml::Value {
+    // try bool, int, float, fallback to string
+    if s == "true" {
+        toml::Value::Boolean(true)
+    } else if s == "false" {
+        toml::Value::Boolean(false)
+    } else if let Ok(i) = s.parse::<i64>() {
+        toml::Value::Integer(i)
+    } else if let Ok(f) = s.parse::<f64>() {
+        toml::Value::Float(f)
+    } else {
+        toml::Value::String(s.to_string())
+    }
 }
 
 #[derive(Args, Debug)]
@@ -47,53 +51,81 @@ impl Runnable for UnapplyCmd {
             .await
             .context(format!("Failed to load snapshot from {:?}", snap_path))?;
 
-        // list which values to restore / delete
-        let undoes: Vec<Undo> = snapshot
-            .settings
-            .into_iter()
-            .rev()
-            .map(|s| {
-                if let Some(o) = s.original_value.clone() {
-                    Undo::Restore {
-                        domain: s.domain,
-                        key: s.key,
-                        orig: o,
-                    }
-                } else {
-                    Undo::Delete {
-                        domain: s.domain,
-                        key: s.key,
-                    }
-                }
-            })
-            .collect();
+        // prepare undo operations, grouping by domain for efficiency
+        let mut batch_restores: HashMap<Domain, Vec<(String, defaults_rs::PrefValue)>> =
+            HashMap::new();
+        let mut batch_deletes: HashMap<Domain, Vec<String>> = HashMap::new();
 
-        // run undo concurrently
-        let mut handles = Vec::new();
-        for u in undoes {
-            handles.push(tokio::spawn(async move {
-                match u {
-                    Undo::Restore { domain, key, orig } => {
-                        let (flag, val_str) = from_flag(&orig).unwrap();
-                        let _ = executor::write(
-                            &domain,
-                            &key,
-                            flag,
-                            &val_str,
-                            "Restoring",
-                            verbose,
-                            dry_run,
-                        )
-                        .await;
+        // peverse order to undo in correct sequence
+        for s in snapshot.settings.into_iter().rev() {
+            let domain_obj = if s.domain == "NSGlobalDomain" {
+                Domain::Global
+            } else {
+                Domain::User(s.domain.clone())
+            };
+            if let Some(orig) = s.original_value {
+                let pref_value = toml_to_prefvalue(&string_to_toml_value(&orig))?;
+                batch_restores
+                    .entry(domain_obj)
+                    .or_default()
+                    .push((s.key, pref_value));
+            } else {
+                batch_deletes.entry(domain_obj).or_default().push(s.key);
+            }
+        }
+
+        // in dry-run mode, just print what would be done
+        if dry_run {
+            for (domain, restores) in &batch_restores {
+                for (key, _) in restores {
+                    let domain_str = match domain {
+                        Domain::Global => "NSGlobalDomain",
+                        Domain::User(s) => s,
+                    };
+                    print_log(
+                        LogLevel::Dry,
+                        &format!("Would restore setting '{}' for {}", key, domain_str),
+                    );
+                }
+            }
+            for (domain, deletes) in &batch_deletes {
+                for key in deletes {
+                    let domain_str = match domain {
+                        Domain::Global => "NSGlobalDomain",
+                        Domain::User(s) => s,
+                    };
+                    print_log(
+                        LogLevel::Dry,
+                        &format!("Would remove setting '{}' for {}", key, domain_str),
+                    );
+                }
+            }
+        } else {
+            // perform batch restores
+            if !batch_restores.is_empty() {
+                match Preferences::write_batch(batch_restores.into_iter().collect()).await {
+                    Ok(_) => {
+                        if verbose {
+                            print_log(LogLevel::Success, "All settings restored (batch write).");
+                        }
                     }
-                    Undo::Delete { domain, key } => {
-                        let _ = executor::delete(&domain, &key, "Removing", verbose, dry_run).await;
+                    Err(e) => {
+                        print_log(LogLevel::Error, &format!("Batch restore failed: {e}"));
                     }
                 }
-            }));
-        }
-        for handle in handles {
-            let _ = handle.await;
+            }
+
+            // perform batch deletes
+            for (domain, keys) in batch_deletes {
+                let domain_str = match &domain {
+                    Domain::Global => "NSGlobalDomain",
+                    Domain::User(s) => s,
+                };
+
+                for key in keys {
+                    let _ = executor::delete(domain_str, &key, "Removing", verbose, dry_run).await;
+                }
+            }
         }
 
         // warn about external commands (not automatically reverted)

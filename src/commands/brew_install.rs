@@ -157,6 +157,7 @@ impl Runnable for BrewInstallCmd {
     }
 }
 
+/// Downloads all formulae/casks before installation.
 async fn fetch_all(formulae: &[String], casks: &[String], verbose: bool) {
     let mut handles = Vec::new();
 
@@ -191,6 +192,7 @@ async fn fetch_all(formulae: &[String], casks: &[String], verbose: bool) {
     }
 }
 
+/// Install formulae/casks sequentially.
 async fn install_sequentially(install_tasks: Vec<Vec<String>>) -> anyhow::Result<()> {
     for args in install_tasks {
         let display = format!("brew {}", args.join(" "));

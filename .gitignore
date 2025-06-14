@@ -2,4 +2,5 @@
 /target
 .DS_Store
 *.zip
+main
 defaults-rs

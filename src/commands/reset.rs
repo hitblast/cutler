@@ -1,12 +1,12 @@
 use anyhow::{Result, bail};
 use async_trait::async_trait;
 use clap::Args;
+use defaults_rs::{Domain, preferences::Preferences};
 use tokio::fs;
 
 use crate::{
     commands::{GlobalArgs, Runnable},
     config::loader::{get_config_path, load_config},
-    defaults::defaults_delete,
     domains::{collect, effective, read_current},
     snapshot::state::get_snapshot_path,
     util::{
@@ -56,22 +56,37 @@ impl Runnable for ResetCmd {
             for (key, _) in table {
                 let (eff_dom, eff_key) = effective(&domain, &key);
 
-                // Only delete it if currently set
+                // only delete it if currently set
                 if read_current(&eff_dom, &eff_key).await.is_some() {
-                    match defaults_delete(&eff_dom, &eff_key, "Resetting", verbose, dry_run).await {
-                        Ok(_) => {
-                            if verbose && !quiet {
+                    let domain_obj = if eff_dom == "NSGlobalDomain" {
+                        Domain::Global
+                    } else if let Some(rest) = eff_dom.strip_prefix("com.apple.") {
+                        Domain::User(format!("com.apple.{}", rest))
+                    } else {
+                        Domain::User(eff_dom.clone())
+                    };
+
+                    if dry_run {
+                        print_log(
+                            LogLevel::Dry,
+                            &format!("Would reset {}.{} to system default", eff_dom, eff_key),
+                        );
+                    } else {
+                        match Preferences::delete(domain_obj, Some(&eff_key)).await {
+                            Ok(_) => {
+                                if verbose && !quiet {
+                                    print_log(
+                                        LogLevel::Success,
+                                        &format!("Reset {}.{} to system default", eff_dom, eff_key),
+                                    );
+                                }
+                            }
+                            Err(e) => {
                                 print_log(
-                                    LogLevel::Success,
-                                    &format!("Reset {}.{} to system default", eff_dom, eff_key),
+                                    LogLevel::Error,
+                                    &format!("Failed to reset {}.{}: {}", eff_dom, eff_key, e),
                                 );
                             }
-                        }
-                        Err(e) => {
-                            print_log(
-                                LogLevel::Error,
-                                &format!("Failed to reset {}.{}: {}", eff_dom, eff_key, e),
-                            );
                         }
                     }
                 } else if verbose && !quiet {
@@ -110,7 +125,7 @@ impl Runnable for ResetCmd {
             println!("\n🍎 Reset complete. All configured settings have been removed.");
         }
 
-        // Restart system services if requested
+        // restart system services if requested
         if !g.no_restart_services {
             crate::util::io::restart_system_services(g).await?;
         }

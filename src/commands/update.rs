@@ -142,7 +142,7 @@ impl Runnable for SelfUpdateCmd {
             return Ok(());
         }
 
-        // Determine architecture for update target
+        // determine architecture for update target
         let arch = std::env::consts::ARCH;
         let target = match arch {
             "x86_64" | "x86" => "darwin-x86_64",

@@ -27,7 +27,7 @@ impl Runnable for StatusCmd {
         let toml = load_config(&config_path).await?;
         let domains = collect(&toml)?;
 
-        // flatten all settings into a list for parallel processing
+        // flatten all settings into a list
         let entries: Vec<(String, String, toml::Value)> = domains
             .into_iter()
             .flat_map(|(domain, table)| {
@@ -37,7 +37,7 @@ impl Runnable for StatusCmd {
             })
             .collect();
 
-        // normal mode: collect results sequentially
+        // collect results
         let mut outcomes = Vec::with_capacity(entries.len());
         for (domain, key, value) in entries.iter() {
             let (eff_dom, eff_key) = effective(domain, key);

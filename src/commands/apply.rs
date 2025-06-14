@@ -1,7 +1,7 @@
 use crate::commands::{BrewInstallCmd, GlobalArgs, Runnable};
 use crate::{
     config::loader::load_config,
-    defaults::{executor, flags},
+    defaults::{convert::toml_to_prefvalue, flags},
     domains::collector,
     external::runner,
     snapshot::state::{SettingState, Snapshot},
@@ -10,6 +10,9 @@ use crate::{
 use anyhow::Result;
 use async_trait::async_trait;
 use clap::Args;
+use defaults_rs::{Domain, preferences::Preferences};
+use std::collections::HashMap;
+use toml::Value;
 
 #[derive(Args, Debug)]
 pub struct ApplyCmd {
@@ -20,6 +23,10 @@ pub struct ApplyCmd {
     /// Invoke `cutler brew install` after applying defaults.
     #[arg(long)]
     pub with_brew: bool,
+
+    /// Risky: Disables check for domain existence before applying modification
+    #[arg(long)]
+    pub disable_checks: bool,
 }
 
 /// Represents an apply command job.
@@ -27,8 +34,7 @@ pub struct ApplyCmd {
 struct Job {
     domain: String,
     key: String,
-    flag: String,
-    value: String,
+    toml_value: Value,
     action: &'static str,
     original: Option<String>,
     new_value: String,
@@ -75,13 +81,13 @@ impl Runnable for ApplyCmd {
 
         for (dom, table) in domains.into_iter() {
             // if we need to insert the com.apple prefix, check once
-            if collector::needs_prefix(&dom) {
-                collector::check_exists(&format!("com.apple.{}", dom)).await?;
+            if collector::needs_prefix(&dom) && !self.disable_checks {
+                collector::check_domain_exists(&format!("com.apple.{}", dom)).await?;
             }
 
-            for (key, val) in table.into_iter() {
+            for (key, toml_value) in table.into_iter() {
                 let (eff_dom, eff_key) = collector::effective(&dom, &key);
-                let desired = flags::normalize(&val);
+                let desired = flags::normalize(&toml_value);
 
                 // read the current value from the system
                 // then, check if changed
@@ -104,14 +110,10 @@ impl Runnable for ApplyCmd {
                         "Applying"
                     };
 
-                    // turn toml value into a -bool/-int/-string + stringified value
-                    let (flag, val_str) = flags::to_flag(&val)?;
-
                     jobs.push(Job {
                         domain: eff_dom.clone(),
                         key: eff_key.clone(),
-                        flag: flag.to_owned(),
-                        value: val_str,
+                        toml_value: toml_value.clone(),
                         action,
                         original,
                         new_value: desired.clone(),
@@ -119,30 +121,61 @@ impl Runnable for ApplyCmd {
                 } else if verbose {
                     print_log(
                         LogLevel::Info,
-                        &format!("Skipping unchanged {}.{}", eff_dom, eff_key),
+                        &format!("Skipping unchanged {}:{}", eff_dom, eff_key),
                     );
                 }
             }
         }
 
-        // now execute writes concurrently with tokio tasks
-        let mut handles = Vec::with_capacity(jobs.len());
-        for job in jobs.iter() {
-            // clone for move into async task
-            let domain = job.domain.clone();
-            let key = job.key.clone();
-            let flag = job.flag.clone();
-            let value = job.value.clone();
-            let action = job.action;
+        // use defaults-rs batch write API for all changed settings
+        // group jobs by domain for batch write
+        let mut batch: HashMap<Domain, Vec<(String, defaults_rs::PrefValue)>> = HashMap::new();
 
-            handles.push(tokio::spawn(async move {
-                let _ =
-                    executor::write(&domain, &key, &flag, &value, action, verbose, dry_run).await;
-            }));
+        for job in &jobs {
+            let domain_obj = if job.domain == "NSGlobalDomain" {
+                Domain::Global
+            } else {
+                Domain::User(job.domain.clone())
+            };
+
+            if verbose && !dry_run {
+                print_log(
+                    LogLevel::Info,
+                    &format!(
+                        "{} {}:{} -> {}",
+                        job.action, job.domain, job.key, job.new_value
+                    ),
+                );
+            }
+            let pref_value = toml_to_prefvalue(&job.toml_value)?;
+            batch
+                .entry(domain_obj)
+                .or_default()
+                .push((job.key.clone(), pref_value));
         }
-        // await all write tasks
-        for handle in handles {
-            let _ = handle.await;
+
+        // perform batch write
+        if !dry_run {
+            match Preferences::write_batch(batch.into_iter().collect()).await {
+                Ok(_) => {
+                    if verbose {
+                        print_log(LogLevel::Success, "All settings applied (batch write).");
+                    }
+                }
+                Err(e) => {
+                    print_log(LogLevel::Error, &format!("Batch write failed: {e}"));
+                }
+            }
+        } else {
+            for job in &jobs {
+                print_log(
+                    LogLevel::Dry,
+                    &format!(
+                        "Would {} setting '{}' for {}",
+                        job.action, job.key, job.domain
+                    ),
+                );
+            }
         }
 
         let mut new_snap = Snapshot::new();
@@ -183,7 +216,7 @@ impl Runnable for ApplyCmd {
             BrewInstallCmd.run(g).await?;
         }
 
-        // Restart system services if requested
+        // restart system services if requested
         if !g.no_restart_services {
             crate::util::io::restart_system_services(g).await?;
         }
