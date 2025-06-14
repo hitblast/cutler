@@ -2,5 +2,5 @@
 /target
 .DS_Store
 *.zip
-.gitignore
+main
 defaults-rs
